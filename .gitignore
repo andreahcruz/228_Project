@@ -1,0 +1,23 @@
+# Python / notebooks
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual envs & IDE
+.venv/
+.vscode/
+
+# Data / delta lake / checkpoints
+data/
+delta/
+**/_ckpt_*/
+**/_delta_log/
+*.parquet
+*.csv
+*.jsonl
+*.log
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
