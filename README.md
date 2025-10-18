@@ -46,8 +46,12 @@ In terminal 2-> #NOTE: this can take up to 6-7 mins to completely run
 source .venv/bin/activate
 python producer/send_reviews.py
 # prints: "done" 
-The localhost page should update so you see the blue ticks and you can run the lines in the data prep notebook to verify
+The localhost page should update so you see the blue ticks and you can run the lines in the data prep notebook to verify NOTE: this is only to prove our gold table exists and looks correct
 <img width="712" height="324" alt="Screenshot 2025-10-17 at 6 21 20 PM" src="https://github.com/user-attachments/assets/8d59a3a1-abad-46b1-89e7-5ac01236e25f" />
+Immediate KPIs you can compute from this table
+Traffic: reviews/min, peak minutes, quiet periods.
+Quality: average rating trend, volatility (std dev) per hour/day.
+Operations: % empty/low-count windows (tells you if ingest rate is too low), lag between event_time and processing time (late data).
 
 Progress so far:
 
