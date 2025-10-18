@@ -18,6 +18,7 @@ pip install pybloom-live               # for Bloom filter (or use the SimpleBloo
 
 # 2) Java 17 in your PATH (macOS/Homebrew example)
 export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+
 export PATH="$JAVA_HOME/bin:$PATH"
 
 # 3) Start Kafka (single broker)
