@@ -1,4 +1,6 @@
-Layout of folder:
+Layout of folder (make the following folders in yours as files will be sent there) :
+- Also upload the yelp dataset (its pretty big we should probably implement some sort of reservoir sampling if we can)
+https://drive.google.com/file/d/1Y_idWZN_MoHuRgBx2riE0MwuVHdTPaLv/view?usp=sharing
 <img width="222" height="545" alt="image" src="https://github.com/user-attachments/assets/abe08133-6ada-4e0f-8345-05196ecf07f2" />
 
 Prerequisites:
