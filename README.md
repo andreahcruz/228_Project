@@ -7,12 +7,13 @@ Python 3.9+ (uses venv)
 Java 17 (required by Spark 3.5.x)
 Docker + Docker Compose (for Kafka)
 
-# 0) clone the repo, cd into it
-
 # 1) Python env
 python3 -m venv .venv
+
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
+
 pip install -r requirements.txt
+
 pip install pybloom-live               # for Bloom filter (or use the SimpleBloom fallback)
 
 # 2) Java 17 in your PATH (macOS/Homebrew example)
