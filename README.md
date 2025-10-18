@@ -36,7 +36,9 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 python spark/stream_reviews.py
 Spark UI: http://localhost:4040
-#<img width="712" height="424" alt="Screenshot 2025-10-17 at 10 03 49 AM" src="https://github.com/user-attachments/assets/17011e7d-ad96-46eb-b54b-e4c3438c4574" />
+<img width="1115" height="936" alt="Screenshot 2025-10-17 at 4 28 02 PM" src="https://github.com/user-attachments/assets/72f66c51-c1aa-4c81-a5de-a3a3e7d65209" />
+
+
  <img width="1770" height="276" alt="Screenshot 2025-10-17 at 6 20 57 PM" src="https://github.com/user-attachments/assets/d8cac2a6-e04e-4045-bb99-2bed3808a184" />
 
 
