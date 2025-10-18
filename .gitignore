@@ -1,23 +1,63 @@
-# Python / notebooks
+# ---------- Python ----------
 __pycache__/
-*.pyc
-.ipynb_checkpoints/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.dist-info/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.coverage
+*.coverage
+.cache/
 
-# Virtual envs & IDE
+# ---------- Virtual envs ----------
 .venv/
+venv/
+env/
+ENV/
+
+# ---------- Jupyter / VS Code ----------
+.ipynb_checkpoints/
 .vscode/
 
-# Data / delta lake / checkpoints
+# ---------- OS junk ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Secrets / creds ----------
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.p12
+# keep example templates:
+!.env.example
+
+# ---------- Data & artifacts (keep repo light) ----------
 data/
 delta/
+exports/
+warehouse.duckdb
 **/_ckpt_*/
 **/_delta_log/
-*.parquet
-*.csv
-*.jsonl
-*.log
-
-# Spark
 spark-warehouse/
 metastore_db/
 derby.log
+
+# Large/derived files anywhere
+*.parquet
+*.orc
+*.avro
+*.csv
+*.tsv
+*.jsonl
+*.log
+
+# ---------- Docker build leftovers ----------
+*.pid
+*.tar
