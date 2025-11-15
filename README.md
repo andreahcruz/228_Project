@@ -82,6 +82,18 @@ Plan: temporarily remove or reduce the producer sleep to stress the pipeline; op
 -Bloom filter is driver-held (demo-friendly, not distributed).
 Plan: keep it for the prototype; document FP behavior and measure against exact duplicates on small windows.
 
+Sampling the Yelp dataset:
+
+- Run `python scripts/sample_yelp.py --records 50000` to create `data/landing/yelp_small.jsonl` from the large `yelp_academic_dataset_review.json`.
+- Use `--method reservoir` for a uniform random sample without loading the whole file into memory; `--method head` (default) keeps the first N reviews.
+- Point the Kafka producer at the generated file (already configured as `data/landing/yelp_small.jsonl`).
+
+Duplicate detection + Bloom metrics:
+
+- Duplicate key = `(user_id, business_id, normalized_text)` where the text is lowercased and internal whitespace is collapsed.
+- The helper in `spark/sketch_bloom.py` maintains a Bloom filter (tune via `BLOOM_CAPACITY` and `BLOOM_ERROR_RATE` env vars).
+- Per-minute duplicate metrics land in `delta/gold_dup_rate_1m/` with columns `(window_start, dup_count, total, dup_rate)`; flagged rows are retained in `delta/dup_bloom/`.
+
 Remaining tasks:
 
 -Reservoir Sampling (uniform sample per window).

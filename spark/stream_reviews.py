@@ -1,5 +1,12 @@
 # spark/stream_reviews.py
+import os
+import sys
+
 from pyspark.sql import SparkSession, functions as F, types as T
+
+current_python = sys.executable
+os.environ.setdefault("PYSPARK_PYTHON", current_python)
+os.environ.setdefault("PYSPARK_DRIVER_PYTHON", current_python)
 
 # --- Spark setup (Kafka connector) ---
 SPARK_VER = "3.5.1"  # match your installed PySpark version
@@ -30,12 +37,17 @@ schema = T.StructType([
     T.StructField("stars",       T.DoubleType()),
     T.StructField("text",        T.StringType()),
     T.StructField("event_time",  T.StringType()),
+    T.StructField("date",        T.StringType()),  # fallback field in Yelp source
 ])
 
 events = (
     raw.select(F.col("value").cast("string").alias("json"))
        .select(F.from_json("json", schema).alias("d")).select("d.*")
-       .withColumn("event_time", F.to_timestamp("event_time"))
+       .withColumn(
+           "event_time",
+           F.to_timestamp(F.coalesce("event_time", "date"))
+       )
+       .drop("date")
        .dropna(subset=["event_time", "user_id", "business_id", "stars"])
 )
 
@@ -76,38 +88,23 @@ metrics_q = (
 
 )
 
-# --- Bloom-filter duplicate detector (driver-held; demo-friendly) ---
-from pybloom_live import BloomFilter
+from sketch_bloom import BloomConfig, BloomDuplicateTracker
 
-BF_CAPACITY = 200_000   # tune for your sample size
-BF_ERROR = 0.01         # ~1% false-positive rate
-_bloom = BloomFilter(capacity=BF_CAPACITY, error_rate=BF_ERROR)
+BLOOM_CAPACITY = int(os.getenv("BLOOM_CAPACITY", "200000"))
+BLOOM_ERROR_RATE = float(os.getenv("BLOOM_ERROR_RATE", "0.01"))
+BLOOM_DUP_SINK = os.getenv("BLOOM_DUP_SINK", "delta/dup_bloom")
+BLOOM_METRICS_SINK = os.getenv("BLOOM_METRICS_SINK", "delta/gold_dup_rate_1m")
 
-# normalized text + ids -> dup key
-norm_text = F.lower(F.regexp_replace(F.col("text"), r"\s+", " "))
-dup_key_col = F.sha2(F.concat_ws("||", "user_id", "business_id", norm_text), 256).alias("dup_key")
-
-def bloom_detect(batch_df, batch_id: int):
-    cols = ["event_time", "review_id", "user_id", "business_id", "stars", "text"]
-    pdf = batch_df.select(*cols, dup_key_col).toPandas()  # OK for small demo batches
-    if pdf.empty:
-        return
-    dup_rows = []
-    for _, r in pdf.iterrows():
-        k = r["dup_key"]
-        if k in _bloom:         # likely seen before
-            dup_rows.append(r)
-        _bloom.add(k)           # record as seen
-    if dup_rows:
-        import pandas as pd
-        out = pd.DataFrame(dup_rows)[cols + ["dup_key"]]
-        (spark.createDataFrame(out)
-              .write.mode("append").parquet("delta/dup_bloom"))
+dup_tracker = BloomDuplicateTracker(
+    spark, BloomConfig(capacity=BLOOM_CAPACITY, error_rate=BLOOM_ERROR_RATE,
+                       dup_sink=BLOOM_DUP_SINK, metrics_sink=BLOOM_METRICS_SINK)
+)
 
 dup_q = (
-    events.writeStream
-    .foreachBatch(bloom_detect)
-    .option("checkpointLocation", "delta/_ckpt_dup_bloom_v2")
+    events.select("event_time", "review_id", "user_id", "business_id", "stars", "text")
+    .writeStream
+    .foreachBatch(dup_tracker.process_batch)
+    .option("checkpointLocation", "delta/_ckpt_dup_bloom_v3")
     .start()
 )
 
