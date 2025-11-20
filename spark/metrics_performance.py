@@ -17,6 +17,7 @@ class PerformanceConfig:
     """Configuration for performance metrics tracking."""
     sink: str = "delta/performance_metrics"
     aggregation_window_minutes: int = 1  # Aggregate metrics per minute
+    trigger_interval_seconds: float = 5.0  # Expected micro-batch trigger interval
 
 
 class PerformanceTracker:
@@ -33,7 +34,7 @@ class PerformanceTracker:
             batch_start_time = time.time()
             
             # Collect batch to measure size and latency
-            pdf = batch_df.select("event_time").toPandas()
+            pdf = batch_df.select("event_time", "ingest_time").toPandas()
             
             if pdf.empty:
                 print(f"[Performance] batch {batch_id}: empty batch, skipping")
@@ -42,15 +43,21 @@ class PerformanceTracker:
             batch_end_time = time.time()
             processing_time = batch_end_time - batch_start_time
             
-            # Calculate throughput (events per second)
+            # Calculate throughput (events per second) based on ingest span
             num_events = len(pdf)
-            throughput = num_events / processing_time if processing_time > 0 else 0.0
+            pdf["event_time"] = pd.to_datetime(pdf["event_time"], utc=True)
+            pdf["ingest_time"] = pd.to_datetime(pdf["ingest_time"], utc=True)
+
+            ingest_span = (pdf["ingest_time"].max() - pdf["ingest_time"].min()).total_seconds()
+            if ingest_span <= 0:
+                ingest_span = self.config.trigger_interval_seconds
+            throughput = num_events / max(ingest_span, 1e-6)
 
             # Calculate latency: event_time to processing_time
             # Ensure both are timezone-aware (UTC) for proper subtraction
-            pdf["event_time"] = pd.to_datetime(pdf["event_time"], utc=True)
             pdf["processing_time"] = pd.to_datetime(batch_end_time, unit="s", utc=True)
-            pdf["latency_seconds"] = (pdf["processing_time"] - pdf["event_time"]).dt.total_seconds()
+            pdf["latency_seconds"] = (pdf["processing_time"] - pdf["ingest_time"]).dt.total_seconds()
+            pdf["event_delay_seconds"] = (pdf["ingest_time"] - pdf["event_time"]).dt.total_seconds().clip(lower=0)
             
             # Aggregate latency stats
             avg_latency = pdf["latency_seconds"].mean()
@@ -58,6 +65,8 @@ class PerformanceTracker:
             p95_latency = pdf["latency_seconds"].quantile(0.95) if len(pdf) > 0 else 0.0
             p99_latency = pdf["latency_seconds"].quantile(0.99) if len(pdf) > 0 else 0.0
             max_latency = pdf["latency_seconds"].max()
+            avg_event_delay = pdf["event_delay_seconds"].mean()
+            max_event_delay = pdf["event_delay_seconds"].max()
 
             # Window for aggregation (1-minute buckets)
             window_start = pd.to_datetime(batch_end_time, unit="s", utc=True).floor("min")
@@ -68,17 +77,25 @@ class PerformanceTracker:
                 "processing_timestamp": pd.to_datetime(batch_end_time, unit="s", utc=True),
                 "num_events": num_events,
                 "processing_time_seconds": processing_time,
+                "ingest_span_seconds": ingest_span,
                 "throughput_events_per_sec": throughput,
                 "avg_latency_seconds": avg_latency,
                 "p50_latency_seconds": p50_latency,
                 "p95_latency_seconds": p95_latency,
                 "p99_latency_seconds": p99_latency,
                 "max_latency_seconds": max_latency,
+                "avg_event_delay_seconds": avg_event_delay,
+                "max_event_delay_seconds": max_event_delay,
             }
             
             self._batch_metrics.append(metric)
             
-            print(f"[Performance] batch {batch_id}: events={num_events}, throughput={throughput:.1f}/s, latency={avg_latency:.2f}s, accumulated={len(self._batch_metrics)}")
+            print(
+                "[Performance] batch "
+                f"{batch_id}: events={num_events}, throughput={throughput:.2f}/s, "
+                f"latency={avg_latency:.3f}s, event_delay={avg_event_delay:.3f}s, "
+                f"accumulated={len(self._batch_metrics)}"
+            )
 
             # Write more frequently - every 3 batches (~15 seconds) or when we have 6+ batches
             # This ensures data is available sooner for the dashboard
@@ -106,9 +123,10 @@ class PerformanceTracker:
             
             # Aggregate by window_start
             grouped = df.groupby("window_start")
+            total_events = grouped["num_events"].sum()
             aggregated = pd.DataFrame({
                 "window_start": grouped["window_start"].first(),
-                "total_events": grouped["num_events"].sum(),
+                "total_events": total_events,
                 "total_processing_time": grouped["processing_time_seconds"].sum(),
                 "avg_throughput": grouped["throughput_events_per_sec"].mean(),
                 "max_throughput": grouped["throughput_events_per_sec"].max(),
@@ -117,8 +135,13 @@ class PerformanceTracker:
                 "p95_latency": grouped["p95_latency_seconds"].quantile(0.95),
                 "p99_latency": grouped["p99_latency_seconds"].quantile(0.95),
                 "max_latency": grouped["max_latency_seconds"].max(),
+                "avg_event_delay": grouped["avg_event_delay_seconds"].mean(),
+                "max_event_delay": grouped["max_event_delay_seconds"].max(),
                 "num_batches": grouped["batch_id"].count(),
             }).reset_index(drop=True)
+
+            window_seconds = max(self.config.aggregation_window_minutes * 60, 1)
+            aggregated["avg_throughput"] = aggregated["total_events"] / window_seconds
 
             # Write to Delta
             self.spark.createDataFrame(aggregated).write.mode("append").parquet(

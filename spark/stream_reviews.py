@@ -51,6 +51,7 @@ events = (
        )
        .drop("date")
        .dropna(subset=["event_time", "user_id", "business_id", "stars"])
+       .withColumn("ingest_time", F.current_timestamp())
 )
 
 # --- Bronze sink (append raw rows) ---
@@ -137,19 +138,23 @@ from sketch_fm import FMConfig, FlajoletMartinTracker
 
 FM_NUM_HASHES = int(os.getenv("FM_NUM_HASHES", "5"))
 FM_SINK = os.getenv("FM_SINK", "delta/fm_distinct_users")
-FM_EXACT_THRESHOLD = int(os.getenv("FM_EXACT_THRESHOLD", "1000"))
+# Use a high default so FM always tracks exact counts for this small dataset
+FM_EXACT_THRESHOLD = int(os.getenv("FM_EXACT_THRESHOLD", "1000000"))
 
 fm_tracker = FlajoletMartinTracker(
-    spark, FMConfig(
+    spark,
+    FMConfig(
         num_hash_functions=FM_NUM_HASHES,
         sink=FM_SINK,
-        watermark_minutes=2,  # Match the watermark from metrics_q
-        compute_exact_for_windows_under=FM_EXACT_THRESHOLD
-    )
+        watermark_minutes=2,  # Windows are 10s; finalize when 2 minutes behind
+        compute_exact_for_windows_under=FM_EXACT_THRESHOLD,
+        window_column="ingest_time",
+        window_size="10s",
+    ),
 )
 
 fm_q = (
-    events.select("event_time", "user_id")
+    events.select("event_time", "ingest_time", "user_id")
     .writeStream
     .foreachBatch(fm_tracker.process_batch)
     .option("checkpointLocation", "delta/_ckpt_fm_v1")
@@ -166,7 +171,7 @@ perf_tracker = PerformanceTracker(
 )
 
 perf_q = (
-    events.select("event_time")
+    events.select("event_time", "ingest_time")
     .writeStream
     .foreachBatch(perf_tracker.process_batch)
     .option("checkpointLocation", "delta/_ckpt_perf_v1")
@@ -246,16 +251,19 @@ dup_high_rated_q = (
 
 # High-rated FM distinct users
 fm_tracker_high_rated = FlajoletMartinTracker(
-    spark, FMConfig(
+    spark,
+    FMConfig(
         num_hash_functions=FM_NUM_HASHES,
         sink="delta/fm_distinct_users_high_rated",
         watermark_minutes=2,
-        compute_exact_for_windows_under=FM_EXACT_THRESHOLD
-    )
+        compute_exact_for_windows_under=FM_EXACT_THRESHOLD,
+        window_column="ingest_time",
+        window_size="10s",
+    ),
 )
 
 fm_high_rated_q = (
-    events_high_rated.select("event_time", "user_id")
+    events_high_rated.select("event_time", "ingest_time", "user_id")
     .writeStream
     .foreachBatch(fm_tracker_high_rated.process_batch)
     .option("checkpointLocation", "delta/_ckpt_fm_high_rated_v1")
@@ -268,7 +276,7 @@ perf_tracker_high_rated = PerformanceTracker(
 )
 
 perf_high_rated_q = (
-    events_high_rated.select("event_time")
+    events_high_rated.select("event_time", "ingest_time")
     .writeStream
     .foreachBatch(perf_tracker_high_rated.process_batch)
     .option("checkpointLocation", "delta/_ckpt_perf_high_rated_v1")
@@ -278,27 +286,53 @@ perf_high_rated_q = (
 
 print("[Targeted Filtering] Started high-rated (≥4 stars) sketching pipelines")
 
+# --- DGIM: Count high-star reviews in sliding window ---
+from sketch_dgim import DGIMConfig, DGIMTracker
+
+DGIM_WINDOW_MINUTES = int(os.getenv("DGIM_WINDOW_MINUTES", "60"))
+DGIM_SINK = os.getenv("DGIM_SINK", "delta/gold_dgim_highstar")
+
+dgim_tracker = DGIMTracker(
+    spark, DGIMConfig(
+        window_minutes=DGIM_WINDOW_MINUTES,
+        sink=DGIM_SINK,
+        compute_exact=True  # Include exact count for comparison
+    )
+)
+
+dgim_q = (
+    events.select("event_time", "stars")
+    .writeStream
+    .foreachBatch(dgim_tracker.process_batch)
+    .option("checkpointLocation", "delta/_ckpt_dgim_v1")
+    .trigger(processingTime="5 seconds")
+    .start()
+)
+print("[DGIM] Started DGIM sliding window tracker for high-star reviews")
+
 # --- Accuracy reporting (systematic FM error and Bloom FP/FN analysis) ---
 from metrics_accuracy import AccuracyConfig, AccuracyReporter
 
 accuracy_reporter_all = AccuracyReporter(
-    spark, AccuracyConfig(
+    spark,
+    AccuracyConfig(
         fm_accuracy_sink="delta/accuracy_fm_summary",
-        bloom_accuracy_sink="delta/accuracy_bloom_summary"
-    )
+        bloom_accuracy_sink="delta/accuracy_bloom_summary",
+    ),
 )
 
 accuracy_reporter_high_rated = AccuracyReporter(
-    spark, AccuracyConfig(
-        fm_accuracy_sink="delta/accuracy_fm_summary_high_rated",
-        bloom_accuracy_sink="delta/accuracy_bloom_summary_high_rated"
-    )
+    spark,
+    AccuracyConfig(
+        fm_accuracy_sink="delta/accuracy_fm_summary",
+        bloom_accuracy_sink="delta/accuracy_bloom_summary",
+    ),
 )
 
 def generate_accuracy_reports_periodically():
     """Background thread to generate accuracy reports periodically."""
     # Wait a bit for data to accumulate
-    time.sleep(300)  # Wait 5 minutes before first report
+    time.sleep(60)  # Wait 1 minute before first report
     
     while True:
         try:
@@ -309,7 +343,7 @@ def generate_accuracy_reports_periodically():
             accuracy_reporter_high_rated.generate_all_reports(suffix="_high_rated")
         except Exception as e:
             print(f"[Accuracy] Error generating reports: {e}")
-        time.sleep(600)  # Generate reports every 10 minutes
+        time.sleep(180)  # Generate reports every 3 minutes
 
 # Start background thread for accuracy reporting
 accuracy_thread = threading.Thread(target=generate_accuracy_reports_periodically, daemon=True)

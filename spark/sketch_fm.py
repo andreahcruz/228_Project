@@ -10,6 +10,7 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import median
 
 import pandas as pd
 
@@ -20,7 +21,10 @@ class FMConfig:
     num_hash_functions: int = 5  # Number of independent hash functions (better accuracy)
     sink: str = "delta/fm_distinct_users"
     watermark_minutes: int = 2
-    compute_exact_for_windows_under: int = 1000  # Compute exact count if window has < N users
+    compute_exact_for_windows_under: int = 1_000_000  # Effectively always compute exact counts for this workload
+    window_column: str = "ingest_time"  # Prefer ingestion time to group active windows
+    # Use small windows so we get many FM samples quickly (for accuracy analysis)
+    window_size: str = "10s"
 
 
 class FlajoletMartinTracker:
@@ -39,17 +43,29 @@ class FlajoletMartinTracker:
 
     def process_batch(self, batch_df, batch_id: int) -> None:  # pragma: no cover (spark hook)
         """Process a micro-batch: update FM sketches and finalize old windows."""
-        cols = ["event_time", "user_id"]
-        pdf = batch_df.select(*cols).toPandas()
+        select_cols = ["event_time", "user_id"]
+        if self.config.window_column and self.config.window_column != "event_time":
+            if self.config.window_column in batch_df.columns:
+                select_cols.append(self.config.window_column)
+        pdf = batch_df.select(*select_cols).toPandas()
         
         if pdf.empty:
             return
-
+        
         pdf["event_time"] = pd.to_datetime(pdf["event_time"])
-        pdf["window_start"] = pdf["event_time"].dt.floor("min")
+        if self.config.window_column in pdf.columns:
+            pdf[self.config.window_column] = pd.to_datetime(pdf[self.config.window_column])
+
+        window_source = (
+            self.config.window_column
+            if self.config.window_column in pdf.columns
+            else "event_time"
+        )
+
+        pdf["window_start"] = pdf[window_source].dt.floor(self.config.window_size)
 
         # Track latest event time for watermark calculation
-        batch_max_time = pdf["event_time"].max().to_pydatetime()
+        batch_max_time = pdf[window_source].max().to_pydatetime()
         if self._latest_event_time is None or batch_max_time > self._latest_event_time:
             self._latest_event_time = batch_max_time
 
@@ -125,24 +141,23 @@ class FlajoletMartinTracker:
         return count
 
     def _estimate_distinct(self, sketch: list[int]) -> float:
-        """Estimate distinct count from FM sketch using harmonic mean."""
-        # Flajolet-Martin estimate: 2^R where R is the average of max trailing zeros
-        # Using harmonic mean of multiple hash functions for better accuracy
-        if not sketch or all(r == 0 for r in sketch):
+        """Estimate distinct count from FM sketch using bias-corrected median."""
+        if not sketch:
             return 0.0
-        
-        # Average of 2^R for each hash function
-        estimates = [2.0 ** r for r in sketch if r > 0]
+
+        # Convert trailing zero counts to per-register estimates
+        estimates = [2.0 ** r for r in sketch]
         if not estimates:
             return 0.0
-        
-        # Use harmonic mean for better accuracy with multiple hash functions
-        if len(estimates) == 1:
-            return estimates[0]
-        
-        # Harmonic mean: n / sum(1/x_i)
-        harmonic_mean = len(estimates) / sum(1.0 / e for e in estimates)
-        return harmonic_mean
+
+        # Median is less sensitive to outliers than arithmetic/harmonic means
+        median_estimate = median(estimates)
+
+        # Bias correction constant for FM (phi ≈ 0.77351)
+        corrected = median_estimate / 0.77351
+
+        # Clamp very small estimates to at least 1 distinct user
+        return max(corrected, 1.0)
 
     def _finalize_window(self, window_start: datetime) -> None:
         """Write the finalized FM estimate and exact count (if computed) to Delta."""
@@ -152,8 +167,9 @@ class FlajoletMartinTracker:
         if not sketch or all(r == 0 for r in sketch):
             return
 
-        # Compute estimate
-        estimate = self._estimate_distinct(sketch)
+        # Compute estimate (raw FM result) and stash for accuracy analysis
+        raw_estimate = self._estimate_distinct(sketch)
+        estimate = raw_estimate
         
         # Get exact count if we tracked it
         exact_count = len(exact_set) if exact_set is not None else None
@@ -161,13 +177,16 @@ class FlajoletMartinTracker:
         # Calculate error if we have exact count
         error_pct = None
         if exact_count is not None and exact_count > 0:
-            error_pct = abs(estimate - exact_count) / exact_count
+            error_pct = abs(raw_estimate - exact_count) / exact_count
+            # Prefer exact counts for finalized output when available
+            estimate = float(exact_count)
 
         # Create result row
         result = pd.DataFrame([{
             "window_start": window_start,
             "distinct_users_estimate": estimate,
             "distinct_users_exact": exact_count,
+            "raw_distinct_users_estimate": raw_estimate,
             "error_percent": error_pct,
             "max_trailing_zeros": max(sketch),
             "num_hash_functions": self.config.num_hash_functions,
