@@ -2,3 +2,6 @@ pandas
 pyarrow
 ipykernel
 jupyter
+datasketch
+sqlalchemy
+psycopg2-binary
